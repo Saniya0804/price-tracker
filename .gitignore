@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+eng.traineddata
+backend/-H/
+playwright-report/
+test-results/

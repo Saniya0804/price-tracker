@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: price-tracker-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npx playwright install --with-deps chromium
+    startCommand: npm start
+    envVars:
+      - key: HEADLESS
+        value: "true"
