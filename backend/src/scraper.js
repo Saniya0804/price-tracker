@@ -157,6 +157,15 @@ async function scrapeOnce(browser, ocrWorker, product) {
     const refresh = page.getByRole('button', { name: SELECTORS.refreshButton }).first();
 
     if (await reveal.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await reveal.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
+      await page.waitForFunction(
+        (selector) => {
+          const button = document.querySelector(selector);
+          return button && !button.disabled;
+        },
+        'button[aria-label="Reveal price"]',
+        { timeout: PRICE_WAIT_MS }
+      );
       await reveal.click();
     } else if (await refresh.isVisible({ timeout: 2000 }).catch(() => false)) {
       await refresh.click();
