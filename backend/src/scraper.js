@@ -211,19 +211,19 @@ async function scrapeOnce(browser, ocrWorker, product) {
     // Click "Reveal Price" if present (first visit); if it's a "Refresh
     // Price" button instead (already revealed), click that to force a fresh read.
     //
-    // Both buttons start disabled — the page's own text says "Hover over
-    // the price area to load the current price," meaning a genuine hover
-    // (with some dwell time) is what enables the button, not just a single
-    // instantaneous hover call followed immediately by a click attempt.
+    // Important: a disabled HTML button cannot receive mouse/hover events
+    // at all — that's standard browser behavior, not something scripting
+    // can work around. So hovering the button itself (while it's disabled)
+    // is a no-op by definition. The page's own text says "Hover over the
+    // price area," meaning the real target is the surrounding container,
+    // which is NOT disabled and can genuinely receive events — hovering
+    // there is what should (per the page's own instructions) cause the
+    // price to load and/or the button to become enabled.
     const priceBlock = page.locator(SELECTORS.priceBlock).first();
     const actionButton = page.locator('button', { hasText: /reveal price|refresh price/i }).first();
 
-    if (await actionButton.isVisible({ timeout: 8000 }).catch(() => false)) {
-      // Hover with a longer, more realistic dwell — small back-and-forth
-      // movement over a few seconds, rather than one static hover — in case
-      // the site expects genuine ongoing pointer presence, not just a single
-      // instantaneous hover event.
-      const box = await actionButton.boundingBox().catch(() => null);
+    if (await priceBlock.isVisible({ timeout: 8000 }).catch(() => false)) {
+      const box = await priceBlock.boundingBox().catch(() => null);
       if (box) {
         const cx = box.x + box.width / 2;
         const cy = box.y + box.height / 2;
@@ -235,17 +235,20 @@ async function scrapeOnce(browser, ocrWorker, product) {
         await priceBlock.hover({ force: true }).catch(() => {});
       }
 
-      // Actively wait for the disabled attribute to actually clear, rather
-      // than assuming hovering instantly enabled it. Kept short (5s) so a
-      // genuinely stuck button doesn't consume most of the attempt budget.
+      // Actively wait for the disabled attribute to actually clear (if a
+      // button is present at all), rather than assuming hovering instantly
+      // enabled it. Kept short (5s) so a genuinely stuck state doesn't
+      // consume most of the attempt budget.
       const enabledHandle = await actionButton.elementHandle().catch(() => null);
       if (enabledHandle) {
         await page
           .waitForFunction((btn) => btn && !btn.disabled, enabledHandle, { timeout: 5000 })
           .catch(() => {
-            // Still disabled after a genuine hover attempt — proceed anyway;
-            // the click below will fail fast (short timeout) and the
-            // diagnostic in readPriceViaOcr will capture the true state.
+            // Still disabled after a genuine hover on the container —
+            // proceed anyway; the click below will fail fast (short
+            // timeout) and the diagnostic in readPriceViaOcr will capture
+            // the true state. The price may also load from the hover
+            // alone, independent of the button ever becoming clickable.
           });
       }
 
