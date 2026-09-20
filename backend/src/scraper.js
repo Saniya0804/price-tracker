@@ -156,6 +156,11 @@ async function scrapeOnce(browser, ocrWorker, product) {
     const priceBlock = page.locator(SELECTORS.priceBlock).first();
     if (await priceBlock.isVisible({ timeout: 2000 }).catch(() => false)) {
       await priceBlock.hover();
+      const box = await priceBlock.boundingBox();
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      }
+      await priceBlock.locator(':scope > div').hover({ force: true }).catch(() => {});
     }
 
     const reveal = page.getByRole('button', { name: SELECTORS.revealButton }).first();
@@ -182,6 +187,11 @@ async function scrapeOnce(browser, ocrWorker, product) {
     if (await failureBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
       const failureText = (await failureBanner.innerText().catch(() => '')).trim();
       throw new Error(`Store reported a product/price failure: ${failureText || 'unknown error'}`);
+    }
+
+    const pageText = await page.locator('body').innerText();
+    if (/jwt issued at future|challenge failed|rate limit|too many requests/i.test(pageText)) {
+      throw new Error(`Store challenge failed: ${pageText.match(/.{0,80}(?:JWT issued at future|challenge failed|rate limit|too many requests).{0,120}/i)?.[0] || 'unknown challenge error'}`);
     }
 
     const priceText = await readPriceViaOcr(page, ocrWorker);
