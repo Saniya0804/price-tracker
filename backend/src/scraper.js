@@ -156,13 +156,13 @@ async function scrapeOnce(browser, ocrWorker, product) {
       await refresh.click();
     }
 
-    // The store sometimes shows an explicit failure state ("Couldn't load
-    // the price after N attempts") with its own "Try Again" button — treat
-    // that as a scrape failure so our own retry loop kicks in, rather than
-    // OCR-ing an error message.
-    const failureBanner = page.getByText(/couldn.?t load the price/i).first();
+    // The store can show an explicit product or price failure instead of the
+    // price output. Detect it before waiting for the output so logs preserve
+    // the real store error rather than a misleading selector timeout.
+    const failureBanner = page.getByText(/couldn.?t load (?:this product|the price)/i).first();
     if (await failureBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
-      throw new Error('Store reported its own price-load failure (challenge_failed or similar)');
+      const failureText = (await failureBanner.innerText().catch(() => '')).trim();
+      throw new Error(`Store reported a product/price failure: ${failureText || 'unknown error'}`);
     }
 
     const priceText = await readPriceViaOcr(page, ocrWorker);
