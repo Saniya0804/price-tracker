@@ -3,13 +3,20 @@
 Tracks products on INE's mock store (https://demo.inelabteamdev.com), scraping
 price and stock every 2 hours, with an honest scrape log and price history.
 
+## Live links
+
+- **Live site**: https://price-tracker-bptnkbajr-saniya-3622.vercel.app
+- **Backend API**: https://price-tracker-backend-a3n8.onrender.com
+- **GitHub repo**: https://github.com/Saniya0804/price-tracker
+
 ## Architecture
 
 - **Frontend**: React + Vite, deployed on Vercel. Search, track, dashboard,
   per-product price chart (Recharts) and scrape log table.
 - **Backend**: Node.js + Express, deployed on Render. Exposes REST endpoints
   and a `/api/scrape/run` endpoint triggered by an external cron.
-- **Database**: Supabase (Postgres) — `products`, `price_history`, `scrape_logs`.
+- **Database**: Supabase (Postgres) — `products`, `catalog`, `price_history`,
+  `scrape_logs`.
 - **Scraper**: Playwright (headless Chromium). The mock store gates its price
   behind a challenge → session → price handshake involving a WASM
   proof-of-work puzzle and an encrypted response payload, so the price is not
@@ -19,6 +26,10 @@ price and stock every 2 hours, with an honest scrape log and price history.
 - **Scheduling**: cron-job.org calls `POST /api/scrape/run` every 2 hours
   (Render's free tier sleeps when idle, so an external cron — not an in-process
   timer — is what actually drives scraping).
+
+Long-running scrape requests return `202 Accepted` immediately and continue in
+the background. This prevents Render and cron-job.org request timeouts. A
+second request for the same product while it is running returns `409 Conflict`.
 
 ## Repo layout
 
@@ -116,6 +127,13 @@ Opens on `http://localhost:5173`.
 5. (Optional) create a second job pinging `/api/health` every 10–14 minutes
    to reduce Render cold-start delay.
 
+**API scrape routes**
+
+- `POST /api/scrape/run` starts a background scrape for all tracked products.
+- `POST /api/products/:id/scrape` starts a background scrape for one product.
+- `GET /api/products/:id/history` returns validated price history.
+- `GET /api/products/:id/logs` returns every scrape attempt and error.
+
 ## Environment variables
 
 | Var | Where | Purpose |
@@ -143,9 +161,27 @@ attempts never write a price.
 
 The store hides the real price behind two anti-scraping tricks: decoy hidden
 elements with plausible-looking but incorrect values, and a scrambled-digit
-custom font on the real visible price. Because of this, the scraper does not
-read the price as text — it screenshots the price element with Playwright and
-runs OCR (`tesseract.js`) on the image, the same way a human eye reads it.
+custom font on the real visible price. The real price is rendered as visible
+per-digit spans, sometimes inside an `<output>` and sometimes inside a `<div>`;
+the scraper finds it by visible structure rather than hardcoding one tag.
+Because of this, the scraper does not read the price as text — it screenshots
+the price element with Playwright and runs OCR (`tesseract.js`) on the image,
+the same way a human eye reads it.
 See `DESIGN_NOTE.md` for the full investigation. `npm install` pulls in
 `tesseract.js` automatically; no extra setup is needed beyond
 `npx playwright install chromium`.
+
+## Security
+
+Never expose `SUPABASE_SERVICE_ROLE_KEY` or `CRON_SECRET` in frontend code,
+GitHub, screenshots, or public documentation. Store them only in Render
+environment variables and keep the cron header value synchronized with
+`CRON_SECRET`.
+
+## Known limitation
+
+The mock store can intermittently rate-limit or reject its challenge from a
+shared hosting IP. Such attempts are recorded as `retried` or `failed`, and no
+price is written to `price_history` unless OCR returns a validated positive
+number. This prevents the application from storing fabricated prices when the
+target site is unavailable or its challenge does not complete.
