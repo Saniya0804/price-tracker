@@ -12,6 +12,7 @@ app.use(express.json());
 const PORT = Number(process.env.PORT || 4000);
 const CRON_SECRET = process.env.CRON_SECRET;
 let scrapeRunInProgress = false;
+const productScrapesInProgress = new Set();
 
 // Keeps Render's free instance responsive; cron-job.org can also ping this
 // on a shorter interval to reduce cold starts.
@@ -97,13 +98,20 @@ app.delete('/api/products/:id', async (req, res) => {
 });
 
 app.post('/api/products/:id/scrape', async (req, res) => {
-  try {
-    const result = await scrapeTrackedProductById(req.params.id);
-    res.json(result);
-  } catch (err) {
-    console.error('[scrape/one]', err);
-    res.status(500).json({ error: 'Scrape failed', detail: String(err.message || err) });
+  const productId = String(req.params.id);
+  if (productScrapesInProgress.has(productId)) {
+    return res.status(409).json({ error: 'This product is already being scraped' });
   }
+
+  productScrapesInProgress.add(productId);
+  res.status(202).json({ accepted: true, message: 'Product scrape started' });
+
+  scrapeTrackedProductById(productId)
+    .then((result) => console.log(`[scrape/one] product ${productId} completed`, result))
+    .catch((err) => console.error(`[scrape/one] product ${productId}`, err))
+    .finally(() => {
+      productScrapesInProgress.delete(productId);
+    });
 });
 
 // Price/stock history for a product.

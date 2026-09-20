@@ -36,7 +36,9 @@ export default function ProductDetail() {
     setError(null);
     try {
       const result = await api.scrapeNow(id);
-      if (!result.ok) {
+      if (result.accepted) {
+        setError('Scrape started. Refresh this page in a minute to see the result.');
+      } else if (!result.ok) {
         setError(result.error || 'Scrape finished without a valid price. Check the log.');
       }
       await load();
