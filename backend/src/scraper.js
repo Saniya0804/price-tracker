@@ -53,14 +53,6 @@ function sleep(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
-export async function createOcrWorker() {
-  const ocrWorker = await createWorker('eng');
-  await ocrWorker.setParameters({
-    tessedit_char_whitelist: '0123456789.,₹RsINR ',
-  });
-  return ocrWorker;
-}
-
 /**
  * Parses a raw price string like "₹3,614" or "3,614.00" into a clean number.
  * Returns null if it doesn't look like a valid price (this is the guard
@@ -124,66 +116,12 @@ async function readStockText(page) {
  */
 async function readPriceViaOcr(page, ocrWorker) {
   const output = page.locator(SELECTORS.finalPriceOutput).first();
-  const priceBlock = page.locator(SELECTORS.priceBlock).first();
-
-  await Promise.race([
-    output.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS }).catch(() => null),
-    priceBlock.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS }).catch(() => null),
-  ]);
-
-  let buffer;
-  if (await output.count()) {
-    buffer = await output.screenshot().catch(() => null);
-  }
-  if (!buffer) {
-    buffer = await priceBlock.screenshot().catch(() => null);
-  }
-  if (!buffer) {
-    throw new Error('Could not capture the visible price area for OCR');
-  }
+  await output.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
 
   // Small pause + screenshot; OCR needs the element fully painted.
+  const buffer = await output.screenshot();
   const { data } = await ocrWorker.recognize(buffer);
   return data.text;
-}
-
-async function triggerPriceReveal(page) {
-  const priceBlock = page.locator(SELECTORS.priceBlock).first();
-  const reveal = page.locator(SELECTORS.revealButton).first();
-  const refresh = page.locator(SELECTORS.refreshButton).first();
-
-  const priceBlockExists = await priceBlock.count().catch(() => 0);
-  if (priceBlockExists) {
-    await page.evaluate(() => {
-      const block = document.querySelector('[class*="price-block"]');
-      const button = Array.from(document.querySelectorAll('button')).find((item) =>
-        /reveal price/i.test(item.textContent || ''),
-      );
-      if (block) {
-        const rect = block.getBoundingClientRect();
-        if (rect && rect.width > 0 && rect.height > 0) {
-          const x = rect.left + rect.width / 2;
-          const y = rect.top + rect.height / 2;
-          block.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: x, clientY: y }));
-          block.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: x, clientY: y }));
-          block.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
-        }
-      }
-      if (button) {
-        button.removeAttribute('disabled');
-        button.disabled = false;
-      }
-    });
-  }
-
-  if (await reveal.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await reveal.click({ force: true, timeout: PRICE_WAIT_MS }).catch(() => null);
-    return;
-  }
-
-  if (await refresh.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await refresh.click({ force: true, timeout: PRICE_WAIT_MS }).catch(() => null);
-  }
 }
 
 /**
@@ -191,7 +129,9 @@ async function triggerPriceReveal(page) {
  * Throws a descriptive Error on any failure — never returns partial/fake data.
  */
 async function scrapeOnce(browser, ocrWorker, product) {
-  const context = await browser.newContext({ deviceScaleFactor: 2 });
+  // A smaller viewport means less to render/screenshot, trimming memory
+  // further on a constrained free-tier instance.
+  const context = await browser.newContext({ viewport: { width: 1024, height: 768 } });
   const page = await context.newPage();
   page.setDefaultTimeout(NAV_TIMEOUT_MS);
 
@@ -205,46 +145,25 @@ async function scrapeOnce(browser, ocrWorker, product) {
       throw new Error(`Bad HTTP status: ${response ? response.status() : 'no response'}`);
     }
 
-    const acceptCookies = page.locator('button[aria-label="Accept cookies"]').first();
-    if (await acceptCookies.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await acceptCookies.evaluate((button) => button.click());
+    // Click "Reveal Price" if present (first visit); if it's a "Refresh
+    // Price" button instead (already revealed), click that to force a fresh read.
+    const reveal = page.locator(SELECTORS.revealButton).first();
+    const refresh = page.locator(SELECTORS.refreshButton).first();
+
+    if (await reveal.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await reveal.click();
+    } else if (await refresh.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await refresh.click();
     }
 
-    const priceBlock = page.locator(SELECTORS.priceBlock).first();
-    await priceBlock.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
-    const priceBox = await priceBlock.boundingBox();
-    if (!priceBox) throw new Error('Price block did not become visible');
-    for (let move = 0; move < 10; move++) {
-      const x = priceBox.x + priceBox.width * (0.2 + (move % 5) * 0.15);
-      const y = priceBox.y + priceBox.height * (0.35 + (move % 2) * 0.3);
-      await page.mouse.move(x, y);
-      await sleep(50);
-    }
-    await sleep(700);
-
-    await triggerPriceReveal(page);
-
+    // The store sometimes shows an explicit failure state ("Couldn't load
+    // the price after N attempts") with its own "Try Again" button — treat
+    // that as a scrape failure so our own retry loop kicks in, rather than
+    // OCR-ing an error message.
     const failureBanner = page.getByText(/couldn.?t load the price/i).first();
-    const priceOutput = page.locator(SELECTORS.finalPriceOutput).first();
-
-    await Promise.race([
-      priceOutput.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS }).catch(() => null),
-      failureBanner.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS }).then(() => {
-        throw new Error('Store reported its own price-load failure (challenge_failed or similar)');
-      }),
-    ]);
-
-    if (await failureBanner.isVisible().catch(() => false)) {
+    if (await failureBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
       throw new Error('Store reported its own price-load failure (challenge_failed or similar)');
     }
-
-    await page.waitForFunction(
-      () => {
-        const output = document.querySelector('[class*="price-block"] output');
-        return Boolean(output && output.textContent && output.textContent.trim().length > 0);
-      },
-      { timeout: PRICE_WAIT_MS },
-    ).catch(() => null);
 
     const priceText = await readPriceViaOcr(page, ocrWorker);
     const stockText = await readStockText(page);
@@ -278,7 +197,7 @@ export async function scrapeProductWithRetry(browser, ocrWorker, product) {
       await supabase.from('scrape_logs').insert({
         product_id: product.id,
         attempt_number: attempt,
-        status: 'success',
+        status: attempt === 1 ? 'success' : 'retried',
         duration_ms: duration,
       });
 
@@ -324,14 +243,34 @@ export async function scrapeAllTrackedProducts() {
     return { scraped: 0, results: [] };
   }
 
-  const normalizedProducts = await normalizeTrackedProductUrls(products);
-
-  const browser = await chromium.launch({ headless: HEADLESS });
-  const ocrWorker = await createOcrWorker();
+  // Render's free tier has ~512MB RAM. Default Chromium's multi-process
+  // architecture plus its GPU/extension overhead can exceed that when
+  // combined with OCR, causing the OS to hard-kill the process — which
+  // bypasses our own try/catch entirely (the scrape just silently vanishes,
+  // no "failed" log gets written). These flags trade a little stability for
+  // a much smaller memory footprint, appropriate for this constraint.
+  const browser = await chromium.launch({
+    headless: HEADLESS,
+    args: [
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--mute-audio',
+      '--no-first-run',
+      '--single-process',
+    ],
+  });
+  // One OCR worker reused for the whole batch — creating a new one per
+  // product would reload the language model every time and be far slower.
+  const ocrWorker = await createWorker('eng');
   const results = [];
 
   try {
-    for (const product of normalizedProducts) {
+    for (const product of products) {
       try {
         const result = await scrapeProductWithRetry(browser, ocrWorker, product);
         results.push({ productId: product.id, ...result });
@@ -350,214 +289,164 @@ export async function scrapeAllTrackedProducts() {
   return { scraped: results.length, results };
 }
 
-export async function scrapeTrackedProductById(id) {
-  const { data: product, error } = await supabase.from('products').select('*').eq('id', id).single();
-  if (error) throw error;
-  const [normalized] = await normalizeTrackedProductUrls([product]);
-  const browser = await chromium.launch({ headless: HEADLESS });
-  const ocrWorker = await createOcrWorker();
-  try {
-    const result = await scrapeProductWithRetry(browser, ocrWorker, normalized);
-    return { product: normalized, ...result };
-  } finally {
-    await ocrWorker.terminate();
-    await browser.close();
-  }
-}
-
 /**
  * ============================================================================
  * WHY SEARCH CRAWLS AND CACHES THE CATALOG, RATHER THAN QUERYING LIVE
  * ============================================================================
- * The store has no search or filter of its own — every one of its ~1000
- * products is only reachable by paging through `/?page=N` (confirmed: 20
- * products per page, ~50 pages, product URLs are `/product/{id}`). The
- * listing is also JS-rendered, so a plain HTTP fetch returns an empty shell
- * (no product cards exist until the page's JavaScript runs) — this requires
- * Playwright, not cheerio, for this step.
+ * The store has no search or filter of its own — its ~1000 products are
+ * only reachable by paging through a listing. The store does, however,
+ * expose a plain JSON catalog API (`/api/catalog?page=N&pageSize=60`),
+ * found by inspecting network requests — no browser needed for this part.
  *
- * Re-crawling all 50 pages on every keystroke would be slow and hammers the
- * store unnecessarily. Instead we crawl the whole catalog once and cache it
- * in Supabase (`catalog` table), and searches just filter that cached list
- * instantly. Call refreshCatalog() once manually (or on a slow schedule,
- * e.g. daily) to keep it up to date; searchProducts() always reads the cache.
+ * Re-fetching all pages on every keystroke would be slow, so we crawl the
+ * whole catalog periodically and cache it in Supabase's `catalog` table;
+ * searchProducts() always reads that cache.
+ *
+ * Reliability notes — this API is deliberately flaky like the rest of the
+ * store (intermittent 429/503, and some individual items missing fields):
+ *  - A page that fails after its own retries is skipped and logged, not
+ *    treated as a fatal error for the whole run. Throwing away 999 good
+ *    products because 1 was momentarily unavailable would be a worse bug
+ *    than the flakiness itself.
+ *  - Only pages that had problems get one retry pass; the whole catalog is
+ *    not re-fetched repeatedly, since that's what was triggering 429s.
+ *  - A short pause between requests paces us under the store's rate limit.
  * ============================================================================
  */
 
-const CATALOG_BASE_URL = `${STORE_BASE_URL}/`;
 const PRODUCT_URL_PREFIX = `${STORE_BASE_URL}/product`;
 
-function canonicalProductUrl(sku, fallbackUrl = null) {
-  const match = String(sku || '').match(/(\d{4,})$/);
-  if (!match) return fallbackUrl;
+async function fetchCatalogPage(pageNum) {
+  const maxApiAttempts = MAX_ATTEMPTS * 2;
+  let lastErr = null;
 
-  const productId = Number(match[1]) - 10000;
-  return productId > 0 ? `${PRODUCT_URL_PREFIX}/${productId}` : fallbackUrl;
-}
-
-async function normalizeTrackedProductUrls(products) {
-  return Promise.all(products.map(async (product) => {
-    const productUrl = canonicalProductUrl(product.sku, product.product_url);
-    if (productUrl === product.product_url) return product;
-
-    const { error } = await supabase
-      .from('products')
-      .update({ product_url: productUrl })
-      .eq('id', product.id);
-    if (error) throw error;
-
-    return { ...product, product_url: productUrl };
-  }));
-}
-
-async function fetchCatalogPage(pageNum, pageSize = 60) {
-  let response = null;
-  const maxApiAttempts = MAX_ATTEMPTS * 4;
   for (let attempt = 1; attempt <= maxApiAttempts; attempt++) {
     try {
-      response = await fetch(`${STORE_BASE_URL}/api/catalog?page=${pageNum}&pageSize=${pageSize}`);
-      if (response.ok) break;
-      if (attempt === maxApiAttempts) {
-        throw new Error(`Catalog API returned HTTP ${response.status}`);
-      }
-    } catch (error) {
-      if (attempt === maxApiAttempts) throw error;
+      const response = await fetch(`${STORE_BASE_URL}/api/catalog?page=${pageNum}&pageSize=60`);
+      if (response.ok) return await response.json();
+      lastErr = new Error(`HTTP ${response.status}`);
+      const retryAfterSeconds = Number(response.headers.get('retry-after')) || 0;
+      const throttledDelayMs = response.status === 429 ? 4000 : 0;
+      await sleep(Math.max(RETRY_BASE_MS * Math.pow(2, attempt - 1), throttledDelayMs, retryAfterSeconds * 1000));
+    } catch (err) {
+      lastErr = err;
+      await sleep(RETRY_BASE_MS * Math.pow(2, attempt - 1));
     }
-    const retryAfterSeconds = Number(response?.headers.get('retry-after')) || 0;
-    const backoffMs = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-    const throttledDelayMs = response?.status === 429 ? 5000 : 0;
-    await sleep(Math.max(backoffMs, throttledDelayMs, retryAfterSeconds * 1000));
   }
-  return response.json();
-}
-
-function catalogRowFromApi(product) {
-  return {
-    name: product.name,
-    sku: product.sku || null,
-    brand: product.brand || null,
-    category: product.category || null,
-    product_url: `${PRODUCT_URL_PREFIX}/${product.id}`,
-  };
+  throw lastErr;
 }
 
 /**
- * Crawls every page of the store's product listing and upserts each product
- * into the `catalog` table in Supabase. Safe to re-run — later runs just
- * refresh existing rows via upsert on product_url.
+ * Crawls the store's catalog API and upserts every valid product found into
+ * the `catalog` table. Always saves what it successfully collected, even if
+ * some pages ultimately failed — see reliability notes above.
  */
 export async function refreshCatalog() {
   const productsById = new Map();
-  let totalProducts = 0;
+  const problemPages = [];
   let totalPages = 1;
-  let round = 0;
 
-  while (round < 20 && (round === 0 || productsById.size < totalProducts)) {
-    round++;
-    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      const payload = await fetchCatalogPage(pageNum);
-      totalProducts = Number(payload.total) || totalProducts;
-      totalPages = Number(payload.pages) || totalPages;
-
-      for (const product of payload.items || []) {
-        if (!product.id || !product.name) continue;
-        const row = catalogRowFromApi(product);
-        productsById.set(row.product_url, row);
-      }
+  function ingest(payload) {
+    totalPages = Number(payload.pages) || totalPages;
+    const items = payload.items || [];
+    let validCount = 0;
+    for (const product of items) {
+      if (!product.id || !product.name) continue;
+      validCount++;
+      productsById.set(String(product.id), {
+        name: product.name,
+        sku: product.sku || null,
+        brand: product.brand || null,
+        category: product.category || null,
+        product_url: `${PRODUCT_URL_PREFIX}/${product.id}`,
+      });
     }
+    return validCount < items.length; // true if this page had some bad items
   }
 
-  if (productsById.size === 0) {
-    throw new Error('Catalog API returned no products');
+  // Pass 1: every page once.
+  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+    try {
+      const hadIssues = ingest(await fetchCatalogPage(pageNum));
+      if (hadIssues) problemPages.push(pageNum);
+    } catch (err) {
+      console.warn(`[catalog] page ${pageNum} failed: ${err.message}`);
+      problemPages.push(pageNum);
+    }
+    await sleep(300); // pace requests, don't trip the rate limiter ourselves
   }
 
-  const validProducts = Array.from(productsById.values()).filter((p) => p.product_url);
+  // Pass 2: retry only the pages that had trouble, once.
+  for (const pageNum of [...new Set(problemPages)]) {
+    try {
+      ingest(await fetchCatalogPage(pageNum));
+    } catch (err) {
+      console.warn(`[catalog] page ${pageNum} failed again, skipping: ${err.message}`);
+    }
+    await sleep(300);
+  }
+
   const uniqueProducts = Array.from(
-    new Map(validProducts.map((product) => [product.product_url, product])).values(),
+    new Map(Array.from(productsById.values()).map((p) => [p.product_url, p])).values()
   );
 
-  if (uniqueProducts.length > 0) {
-    const { error } = await supabase
-      .from('catalog')
-      .upsert(uniqueProducts, { onConflict: 'product_url' });
-    if (error) throw error;
+  if (uniqueProducts.length === 0) {
+    throw new Error('Catalog refresh got zero valid products — store may be down or its API changed');
   }
 
-  return {
-    crawled: productsById.size,
-    saved: uniqueProducts.length,
-    expected: totalProducts || null,
-    complete: totalProducts > 0 ? uniqueProducts.length >= totalProducts : true,
-  };
-}
+  const { error } = await supabase.from('catalog').upsert(uniqueProducts, { onConflict: 'product_url' });
+  if (error) throw error;
 
-async function searchAndCacheLive(query) {
-  const needle = (query || '').trim().toLowerCase();
-  const matches = [];
-  const pending = [];
-
-  if (!needle) {
-    const payload = await fetchCatalogPage(1);
-    const rows = (payload.items || [])
-      .filter((product) => product.id && product.name)
-      .map(catalogRowFromApi);
-    if (rows.length) {
-      await supabase.from('catalog').upsert(rows, { onConflict: 'product_url' });
-    }
-    return rows.slice(0, 50);
-  }
-
-  let pageNum = 1;
-  let totalPages = 1;
-  while (pageNum <= totalPages && matches.length < 50) {
-    const payload = await fetchCatalogPage(pageNum);
-    totalPages = Number(payload.pages) || totalPages;
-    for (const product of payload.items || []) {
-      if (!product.id || !product.name) continue;
-      const row = catalogRowFromApi(product);
-      pending.push(row);
-      const hay = `${row.name} ${row.sku || ''}`.toLowerCase();
-      if (hay.includes(needle)) matches.push(row);
-    }
-    if (pending.length >= 120) {
-      await supabase.from('catalog').upsert(pending.splice(0), { onConflict: 'product_url' });
-    }
-    pageNum++;
-  }
-
-  if (pending.length) {
-    await supabase.from('catalog').upsert(pending, { onConflict: 'product_url' });
-  }
-
-  return matches.slice(0, 50);
+  return { saved: uniqueProducts.length, pagesWithIssues: [...new Set(problemPages)].length };
 }
 
 /**
- * Searches the cached catalog by partial/full product name. If the cache is
- * empty (first run), pages the store's /api/catalog endpoint live so search
- * works without a manual crawl.
+ * Searches the cached catalog by partial/full product name. Does NOT hit
+ * the live store — see refreshCatalog() for how the cache is populated.
  */
 export async function searchProducts(query) {
-  const needle = (query || '').trim();
-  const { count, error: countError } = await supabase
-    .from('catalog')
-    .select('id', { count: 'exact', head: true });
-  if (countError) throw countError;
-
-  if (!count) {
-    return searchAndCacheLive(needle);
-  }
-
   let q = supabase.from('catalog').select('*').limit(50);
-  if (needle) {
-    q = q.ilike('name', `%${needle}%`);
+  if (query) {
+    q = q.ilike('name', `%${query}%`);
   }
   const { data, error } = await q;
   if (error) throw error;
-
-  if (needle && (!data || data.length === 0)) {
-    return searchAndCacheLive(needle);
-  }
-
   return data || [];
+}
+/**
+ * Scrapes a single tracked product by its id (used by routes that trigger a
+ * scrape for one product on demand, e.g. a "scrape now" button).
+ */
+export async function scrapeTrackedProductById(productId) {
+  const { data: product, error } = await supabase
+    .from('products')
+    .select('*')
+    .eq('id', productId)
+    .single();
+  if (error) throw error;
+  if (!product) throw new Error(`Product ${productId} not found`);
+
+  const browser = await chromium.launch({
+    headless: HEADLESS,
+    args: [
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--mute-audio',
+      '--no-first-run',
+      '--single-process',
+    ],
+  });
+  const ocrWorker = await createWorker('eng');
+
+  try {
+    return await scrapeProductWithRetry(browser, ocrWorker, product);
+  } finally {
+    await ocrWorker.terminate();
+    await browser.close();
+  }
 }
