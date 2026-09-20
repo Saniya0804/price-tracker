@@ -177,32 +177,41 @@ async function scrapeOnce(browser, ocrWorker, product) {
     const actionButton = page.locator('button', { hasText: /reveal price|refresh price/i }).first();
 
     if (await actionButton.isVisible({ timeout: 8000 }).catch(() => false)) {
-      // Hover with real dwell time: move the mouse in steps (a more
-      // realistic motion than jumping straight there) and hold briefly.
+      // Hover with a longer, more realistic dwell — small back-and-forth
+      // movement over a few seconds, rather than one static hover — in case
+      // the site expects genuine ongoing pointer presence, not just a single
+      // instantaneous hover event.
       const box = await actionButton.boundingBox().catch(() => null);
       if (box) {
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+        const cx = box.x + box.width / 2;
+        const cy = box.y + box.height / 2;
+        for (let i = 0; i < 6; i++) {
+          await page.mouse.move(cx + (i % 2 === 0 ? -2 : 2), cy, { steps: 5 });
+          await sleep(400);
+        }
       } else {
         await priceBlock.hover({ force: true }).catch(() => {});
       }
-      await actionButton.hover({ force: true }).catch(() => {});
-      await sleep(800); // give the hover a moment to register before checking
 
       // Actively wait for the disabled attribute to actually clear, rather
-      // than assuming one hover instantly enabled it.
+      // than assuming hovering instantly enabled it. Kept short (5s) so a
+      // genuinely stuck button doesn't consume most of the attempt budget.
       const enabledHandle = await actionButton.elementHandle().catch(() => null);
       if (enabledHandle) {
         await page
-          .waitForFunction((btn) => btn && !btn.disabled, enabledHandle, { timeout: PRICE_WAIT_MS })
+          .waitForFunction((btn) => btn && !btn.disabled, enabledHandle, { timeout: 5000 })
           .catch(() => {
-            // If it never enables, let the click below fail/timeout too —
-            // that failure will be captured by the diagnostic in
-            // readPriceViaOcr rather than silently hanging.
+            // Still disabled after a genuine hover attempt — proceed anyway;
+            // the click below will fail fast (short timeout) and the
+            // diagnostic in readPriceViaOcr will capture the true state.
           });
       }
 
-      await actionButton.click({ timeout: PRICE_WAIT_MS }).catch((err) => {
-        throw new Error(`Could not click reveal/refresh button (still disabled?): ${err.message}`);
+      await actionButton.click({ timeout: 3000 }).catch(() => {
+        // Some product variants may load purely from the hover itself,
+        // without ever allowing a real click. Don't hard-fail here — let
+        // execution continue to wait for the price; if it never appears,
+        // the diagnostic below still captures the real reason honestly.
       });
     }
 
