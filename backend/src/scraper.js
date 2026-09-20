@@ -261,7 +261,6 @@ export async function scrapeAllTrackedProducts() {
       '--disable-sync',
       '--mute-audio',
       '--no-first-run',
-      '--single-process',
     ],
   });
   // One OCR worker reused for the whole batch — creating a new one per
@@ -438,7 +437,6 @@ export async function scrapeTrackedProductById(productId) {
       '--disable-sync',
       '--mute-audio',
       '--no-first-run',
-      '--single-process',
     ],
   });
   const ocrWorker = await createWorker('eng');
