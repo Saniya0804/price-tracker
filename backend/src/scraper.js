@@ -153,6 +153,11 @@ async function scrapeOnce(browser, ocrWorker, product) {
 
     // Click "Reveal Price" if present (first visit); if it's a "Refresh
     // Price" button instead (already revealed), click that to force a fresh read.
+    const priceBlock = page.locator(SELECTORS.priceBlock).first();
+    if (await priceBlock.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await priceBlock.hover();
+    }
+
     const reveal = page.getByRole('button', { name: SELECTORS.revealButton }).first();
     const refresh = page.getByRole('button', { name: SELECTORS.refreshButton }).first();
 
