@@ -33,8 +33,8 @@ const HEADLESS = process.env.HEADLESS !== 'false';
  * ============================================================================
  */
 const SELECTORS = {
-  revealButton: 'button:has-text("REVEAL PRICE"), button:has-text("Reveal Price")',
-  refreshButton: 'button:has-text("REFRESH PRICE"), button:has-text("Refresh Price")',
+  revealButton: /reveal price/i,
+  refreshButton: /refresh price/i,
   // The container that wraps the whole price display — verified against the
   // live site: a div whose class includes "price-block".
   priceBlock: '[class*="price-block"]',
@@ -147,8 +147,8 @@ async function scrapeOnce(browser, ocrWorker, product) {
 
     // Click "Reveal Price" if present (first visit); if it's a "Refresh
     // Price" button instead (already revealed), click that to force a fresh read.
-    const reveal = page.locator(SELECTORS.revealButton).first();
-    const refresh = page.locator(SELECTORS.refreshButton).first();
+    const reveal = page.getByRole('button', { name: SELECTORS.revealButton }).first();
+    const refresh = page.getByRole('button', { name: SELECTORS.refreshButton }).first();
 
     if (await reveal.isVisible({ timeout: 2000 }).catch(() => false)) {
       await reveal.click();

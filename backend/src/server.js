@@ -11,6 +11,7 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT || 4000);
 const CRON_SECRET = process.env.CRON_SECRET;
+let scrapeRunInProgress = false;
 
 // Keeps Render's free instance responsive; cron-job.org can also ping this
 // on a shorter interval to reduce cold starts.
@@ -136,13 +137,19 @@ app.post('/api/scrape/run', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  try {
-    const result = await scrapeAllTrackedProducts();
-    res.json(result);
-  } catch (err) {
-    console.error('[scrape/run]', err);
-    res.status(500).json({ error: 'Scrape run failed', detail: String(err.message || err) });
+  if (scrapeRunInProgress) {
+    return res.status(409).json({ error: 'A scrape run is already in progress' });
   }
+
+  scrapeRunInProgress = true;
+  res.status(202).json({ accepted: true, message: 'Scrape run started' });
+
+  scrapeAllTrackedProducts()
+    .then((result) => console.log('[scrape/run] completed', result))
+    .catch((err) => console.error('[scrape/run]', err))
+    .finally(() => {
+      scrapeRunInProgress = false;
+    });
 });
 
 function startServer(port) {
