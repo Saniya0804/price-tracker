@@ -145,6 +145,12 @@ async function scrapeOnce(browser, ocrWorker, product) {
       throw new Error(`Bad HTTP status: ${response ? response.status() : 'no response'}`);
     }
 
+    const failureBanner = page.getByText(/couldn.?t load (?:this product|the price)/i).first();
+    if (await failureBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
+      const failureText = (await failureBanner.innerText().catch(() => '')).trim();
+      throw new Error(`Store reported a product/price failure: ${failureText || 'unknown error'}`);
+    }
+
     // Click "Reveal Price" if present (first visit); if it's a "Refresh
     // Price" button instead (already revealed), click that to force a fresh read.
     const reveal = page.getByRole('button', { name: SELECTORS.revealButton }).first();
@@ -159,7 +165,6 @@ async function scrapeOnce(browser, ocrWorker, product) {
     // The store can show an explicit product or price failure instead of the
     // price output. Detect it before waiting for the output so logs preserve
     // the real store error rather than a misleading selector timeout.
-    const failureBanner = page.getByText(/couldn.?t load (?:this product|the price)/i).first();
     if (await failureBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
       const failureText = (await failureBanner.innerText().catch(() => '')).trim();
       throw new Error(`Store reported a product/price failure: ${failureText || 'unknown error'}`);
