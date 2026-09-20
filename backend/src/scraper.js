@@ -168,23 +168,42 @@ async function scrapeOnce(browser, ocrWorker, product) {
 
     // Click "Reveal Price" if present (first visit); if it's a "Refresh
     // Price" button instead (already revealed), click that to force a fresh read.
+    //
+    // Both buttons start disabled — the page's own text says "Hover over
+    // the price area to load the current price," meaning a genuine hover
+    // (with some dwell time) is what enables the button, not just a single
+    // instantaneous hover call followed immediately by a click attempt.
     const priceBlock = page.locator(SELECTORS.priceBlock).first();
-    if (await priceBlock.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await priceBlock.hover();
-      const box = await priceBlock.boundingBox();
+    const actionButton = page.locator('button', { hasText: /reveal price|refresh price/i }).first();
+
+    if (await actionButton.isVisible({ timeout: 8000 }).catch(() => false)) {
+      // Hover with real dwell time: move the mouse in steps (a more
+      // realistic motion than jumping straight there) and hold briefly.
+      const box = await actionButton.boundingBox().catch(() => null);
       if (box) {
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+      } else {
+        await priceBlock.hover({ force: true }).catch(() => {});
       }
-      await priceBlock.locator(':scope > div').hover({ force: true }).catch(() => {});
-    }
+      await actionButton.hover({ force: true }).catch(() => {});
+      await sleep(800); // give the hover a moment to register before checking
 
-    const reveal = page.locator('button', { hasText: /reveal price/i }).first();
-    const refresh = page.locator('button', { hasText: /refresh price/i }).first();
+      // Actively wait for the disabled attribute to actually clear, rather
+      // than assuming one hover instantly enabled it.
+      const enabledHandle = await actionButton.elementHandle().catch(() => null);
+      if (enabledHandle) {
+        await page
+          .waitForFunction((btn) => btn && !btn.disabled, enabledHandle, { timeout: PRICE_WAIT_MS })
+          .catch(() => {
+            // If it never enables, let the click below fail/timeout too —
+            // that failure will be captured by the diagnostic in
+            // readPriceViaOcr rather than silently hanging.
+          });
+      }
 
-    if (await reveal.isVisible({ timeout: 8000 }).catch(() => false)) {
-      await reveal.click();
-    } else if (await refresh.isVisible({ timeout: 8000 }).catch(() => false)) {
-      await refresh.click();
+      await actionButton.click({ timeout: PRICE_WAIT_MS }).catch((err) => {
+        throw new Error(`Could not click reveal/refresh button (still disabled?): ${err.message}`);
+      });
     }
 
     // The store can show an explicit product or price failure instead of the
