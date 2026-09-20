@@ -109,21 +109,62 @@ async function readStockText(page) {
 }
 
 /**
+ * Finds the real, currently-displayed price element by what it structurally
+ * looks like, not by a fixed tag name — the store has been observed
+ * rendering the real price as both an <output> and a plain <div>, so
+ * hardcoding a tag name is fragile. The real price element is: visible,
+ * not deliberately hidden, not struck-through (that's the original price),
+ * and made of several per-digit <span> children — the largest-font such
+ * element in the price block is the genuine current price.
+ */
+async function findPriceElement(page) {
+  const handle = await page.evaluateHandle((rootSelector) => {
+    const root = document.querySelector(rootSelector);
+    if (!root) return null;
+    const candidates = Array.from(root.querySelectorAll('*')).filter((el) => {
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (el.getAttribute('aria-hidden') === 'true') return false;
+      if (style.textDecoration && style.textDecoration.includes('line-through')) return false;
+      const spanChildren = Array.from(el.children).filter((c) => c.tagName === 'SPAN');
+      return spanChildren.length >= 3;
+    });
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      const fa = parseFloat(window.getComputedStyle(a).fontSize) || 0;
+      const fb = parseFloat(window.getComputedStyle(b).fontSize) || 0;
+      return fb - fa;
+    });
+    return candidates[0];
+  }, SELECTORS.priceBlock);
+
+  const element = handle.asElement();
+  if (!element) {
+    await handle.dispose();
+    return null;
+  }
+  return element;
+}
+
+/**
  * Reads the real displayed price via OCR instead of text scraping. See the
  * big comment above SELECTORS for why: the DOM text for the price is
- * deliberately unreliable (decoy hidden spans, scrambled per-digit font).
- * A screenshot shows exactly what a human sees, sidestepping both tricks.
+ * deliberately unreliable (decoy hidden spans, scrambled per-digit font,
+ * and — confirmed by direct observation — even the wrapping tag name varies
+ * between visits). A screenshot shows exactly what a human sees, sidestepping
+ * all of that.
  */
 async function readPriceViaOcr(page, ocrWorker) {
-  const output = page.locator(SELECTORS.finalPriceOutput).first();
+  const start = Date.now();
+  let element = null;
 
-  try {
-    await output.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
-  } catch (err) {
-    // Diagnostic capture: rather than guess again at why the price never
-    // appeared, grab what's actually in the price block right now so the
-    // scrape_logs entry tells us definitively (button text present, error
-    // banner, still showing "Price hidden", etc.) instead of a bare timeout.
+  while (Date.now() - start < PRICE_WAIT_MS) {
+    element = await findPriceElement(page);
+    if (element) break;
+    await sleep(400);
+  }
+
+  if (!element) {
     const diagnostic = await page
       .locator(SELECTORS.priceBlock)
       .first()
@@ -133,9 +174,10 @@ async function readPriceViaOcr(page, ocrWorker) {
     throw new Error(`Price never appeared. Price block contents at failure: ${trimmed}`);
   }
 
-  // Small pause + screenshot; OCR needs the element fully painted.
-  const buffer = await output.screenshot();
+  await sleep(500); // let any fade-in animation settle before screenshotting
+  const buffer = await element.screenshot();
   const { data } = await ocrWorker.recognize(buffer);
+  await element.dispose();
   return data.text;
 }
 
