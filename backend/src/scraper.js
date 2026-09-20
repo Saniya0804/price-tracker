@@ -116,7 +116,22 @@ async function readStockText(page) {
  */
 async function readPriceViaOcr(page, ocrWorker) {
   const output = page.locator(SELECTORS.finalPriceOutput).first();
-  await output.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
+
+  try {
+    await output.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
+  } catch (err) {
+    // Diagnostic capture: rather than guess again at why the price never
+    // appeared, grab what's actually in the price block right now so the
+    // scrape_logs entry tells us definitively (button text present, error
+    // banner, still showing "Price hidden", etc.) instead of a bare timeout.
+    const diagnostic = await page
+      .locator(SELECTORS.priceBlock)
+      .first()
+      .innerHTML()
+      .catch(() => '(could not read price block HTML)');
+    const trimmed = diagnostic.replace(/\s+/g, ' ').slice(0, 400);
+    throw new Error(`Price never appeared. Price block contents at failure: ${trimmed}`);
+  }
 
   // Small pause + screenshot; OCR needs the element fully painted.
   const buffer = await output.screenshot();
@@ -163,21 +178,12 @@ async function scrapeOnce(browser, ocrWorker, product) {
       await priceBlock.locator(':scope > div').hover({ force: true }).catch(() => {});
     }
 
-    const reveal = page.getByRole('button', { name: SELECTORS.revealButton }).first();
-    const refresh = page.getByRole('button', { name: SELECTORS.refreshButton }).first();
+    const reveal = page.locator('button', { hasText: /reveal price/i }).first();
+    const refresh = page.locator('button', { hasText: /refresh price/i }).first();
 
-    if (await reveal.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await reveal.waitFor({ state: 'visible', timeout: PRICE_WAIT_MS });
-      await page.waitForFunction(
-        (selector) => {
-          const button = document.querySelector(selector);
-          return button && !button.disabled;
-        },
-        'button[aria-label="Reveal price"]',
-        { timeout: PRICE_WAIT_MS }
-      );
+    if (await reveal.isVisible({ timeout: 8000 }).catch(() => false)) {
       await reveal.click();
-    } else if (await refresh.isVisible({ timeout: 2000 }).catch(() => false)) {
+    } else if (await refresh.isVisible({ timeout: 8000 }).catch(() => false)) {
       await refresh.click();
     }
 
